@@ -1,0 +1,82 @@
+name: Build Loop unsigned - KSign profile alignment (experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      LOOP_EXPECTED_BUNDLE_ID: app.soy-bean3455.topaz4131
+      LOOP_EXPECTED_APP_GROUP: group.6428e72aafb3d1b1.1
+    steps:
+      - name: Check out LoopWorkspace including submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Show Xcode toolchain
+        run: |
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Build unsigned Loop with explicit bundle ID and App Group
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace LoopWorkspace.xcworkspace \
+            -scheme LoopWorkspace \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/DerivedData" \
+            'LOOP_DEVELOPMENT_TEAM=TFYM62X6CN' \
+            'DEVELOPMENT_TEAM=TFYM62X6CN' \
+            'MAIN_APP_BUNDLE_IDENTIFIER=app.soy-bean3455.topaz4131' \
+            'APP_GROUP_IDENTIFIER=group.6428e72aafb3d1b1.1' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build 2>&1 | tee build.log
+
+      - name: Validate identifiers in compiled app and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$PWD/DerivedData/Build/Products/Release-iphoneos/Loop.app"
+          test -d "$app" || { echo 'Loop.app missing' >&2; exit 1; }
+          bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$app/Info.plist")"
+          app_group="$(plutil -extract AppGroupIdentifier raw -o - "$app/Info.plist")"
+          {
+            echo "Compiled main app bundle ID: $bundle_id"
+            echo "Compiled App Group ID: $app_group"
+            echo 'NOTE: No provisioning profile or signatures have been validated by this workflow.'
+            echo 'Nested extensions and capabilities must be checked after KSign signing.'
+            echo 'Embedded app extensions:'
+          } | tee build-metadata.txt
+          while IFS= read -r -d '' extension; do
+            echo "$(basename "$extension"): $(plutil -extract CFBundleIdentifier raw -o - "$extension/Info.plist")" | tee -a build-metadata.txt
+          done < <(find "$app/PlugIns" -type d -name '*.appex' -print0 2>/dev/null || true)
+          if [[ "$bundle_id" != "$LOOP_EXPECTED_BUNDLE_ID" || "$app_group" != "$LOOP_EXPECTED_APP_GROUP" ]]; then
+            echo 'STOP: compiled identifiers do not match intended values.' >&2
+            exit 1
+          fi
+          mkdir -p package/Payload
+          ditto "$app" package/Payload/Loop.app
+          (cd package && zip -qry ../Loop-unsigned-v3.ipa Payload)
+          unzip -t Loop-unsigned-v3.ipa | tail -n 2
+
+      - name: Upload IPA, validation metadata, and build log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: loop-unsigned-v3-build
+          path: |
+            Loop-unsigned-v3.ipa
+            build-metadata.txt
+            build.log
+          if-no-files-found: warn
