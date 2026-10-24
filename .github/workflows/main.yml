@@ -29,7 +29,6 @@ jobs:
             -workspace LoopWorkspace.xcworkspace \
             -scheme LoopWorkspace \
             -configuration Release \
-            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$PWD/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
