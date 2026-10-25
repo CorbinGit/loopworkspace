@@ -1,0 +1,112 @@
+# Experimental unsigned Loop build for later LOCAL signing with a third-party profile.
+# This workflow does NOT install or sign Loop and cannot validate pump-control reliability.
+# Source: official LoopKit/LoopWorkspace fork with recursive submodules.
+name: Build Loop unsigned - KSign profile v4 (experimental)
+
+on:
+  workflow_dispatch:
+    inputs:
+      team_id:
+        description: 'Apple Team ID shown in KSign profile'
+        required: true
+        type: string
+        default: '4YC6W65CQN'
+      bundle_id:
+        description: 'Bundle identifier: application-identifier MINUS the Team ID and dot'
+        required: true
+        type: string
+        default: 'app.-jade5197.gypsum9420'
+      app_group:
+        description: 'An App Group listed in the same KSign provisioning profile'
+        required: true
+        type: string
+        default: 'group.e4dc68434eed8347.1'
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      TEAM_ID: ${{ inputs.team_id }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      APP_GROUP: ${{ inputs.app_group }}
+    steps:
+      - name: Check out LoopWorkspace with all submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Validate supplied identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo 'ERROR: Team ID must be 10 uppercase letters or digits.' >&2; exit 1; }
+          [[ "$BUNDLE_ID" =~ ^[a-zA-Z0-9.-]+$ ]] || { echo 'ERROR: Invalid bundle identifier characters.' >&2; exit 1; }
+          [[ "$APP_GROUP" == group.* ]] || { echo 'ERROR: App Group must begin with group.' >&2; exit 1; }
+          echo "Intended application-identifier: $TEAM_ID.$BUNDLE_ID"
+          echo "Intended App Group: $APP_GROUP"
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Build unsigned Loop (Xcode selects SDK for watch targets)
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace LoopWorkspace.xcworkspace \
+            -scheme LoopWorkspace \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/DerivedData" \
+            "LOOP_DEVELOPMENT_TEAM=$TEAM_ID" \
+            "DEVELOPMENT_TEAM=$TEAM_ID" \
+            "MAIN_APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" \
+            "APP_GROUP_IDENTIFIER=$APP_GROUP" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build 2>&1 | tee build.log
+
+      - name: Verify compiled identifiers and package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$PWD/DerivedData/Build/Products/Release-iphoneos/Loop.app"
+          test -d "$app" || { echo 'ERROR: Loop.app was not produced.' >&2; exit 1; }
+          actual_bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$app/Info.plist")"
+          actual_group="$(plutil -extract AppGroupIdentifier raw -o - "$app/Info.plist")"
+          {
+            echo "Requested Team ID: $TEAM_ID"
+            echo "Expected Bundle ID: $BUNDLE_ID"
+            echo "Compiled Bundle ID: $actual_bundle_id"
+            echo "Expected App Group: $APP_GROUP"
+            echo "Compiled App Group: $actual_group"
+            echo 'Nested app extensions (may require separately provisioned signing):'
+          } | tee build-metadata.txt
+          find "$app/PlugIns" -type d -name '*.appex' -print0 2>/dev/null | while IFS= read -r -d '' extension; do
+            extension_id="$(plutil -extract CFBundleIdentifier raw -o - "$extension/Info.plist")"
+            echo "$(basename "$extension"): $extension_id" | tee -a build-metadata.txt
+          done || true
+          if [[ "$actual_bundle_id" != "$BUNDLE_ID" || "$actual_group" != "$APP_GROUP" ]]; then
+            echo 'ERROR: Compiled identifiers do not match input values. Do not sign this build.' >&2
+            exit 1
+          fi
+          mkdir -p package/Payload
+          ditto "$app" package/Payload/Loop.app
+          (cd package && zip -qry ../Loop-unsigned-v4.ipa Payload)
+          unzip -t Loop-unsigned-v4.ipa | tail -n 2
+          echo 'WARNING: Unsigned IPA only. Signing and insulin delivery have NOT been tested.' | tee -a build-metadata.txt
+
+      - name: Upload build files
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: loop-unsigned-v4-build
+          path: |
+            Loop-unsigned-v4.ipa
+            build-metadata.txt
+            build.log
+          if-no-files-found: warn
